@@ -359,6 +359,7 @@ class BeamSearchDecoderCTC:
         prune_history: bool,
         hotword_scorer: HotwordScorer,
         lm_start_state: LMState = None,
+        beams_to_filter: List[str] = list(),
     ) -> List[OutputBeam]:
         """Perform beam search decoding."""
         # local dictionaries to cache scores during decoding
@@ -373,6 +374,7 @@ class BeamSearchDecoderCTC:
         cached_p_lm_scores: Dict[str, float] = {}
         # start with single beam to expand on
         beams = [EMPTY_START_BEAM]
+        beams_to_filter = [beam.lower() for beam in beams_to_filter]
         # bpe we can also have trailing word boundaries ▁⁇▁ so we may need to remember breaks
         force_next_break = False
         for frame_idx, logit_col in enumerate(logits):
@@ -470,6 +472,9 @@ class BeamSearchDecoderCTC:
                             )
                         )
 
+                    if text.lower() in beams_to_filter:
+                        new_beams.pop()
+
             # lm scoring and beam pruning
             new_beams = _merge_beams(new_beams)
             scored_beams = self._get_lm_beams(
@@ -478,23 +483,25 @@ class BeamSearchDecoderCTC:
                 cached_lm_scores,
                 cached_p_lm_scores,
             )
-            # remove beam outliers
-            max_score = max([b[-1] for b in scored_beams])
-            scored_beams = [b for b in scored_beams if b[-1] >= max_score + beam_prune_logp]
-            # beam pruning by taking highest N prefixes and then filtering down
-            trimmed_beams = _sort_and_trim_beams(scored_beams, beam_width)
-            # prune history and remove lm score from beams
-            if prune_history:
-                lm_order = 1 if language_model is None else language_model.order
-                beams = _prune_history(trimmed_beams, lm_order=lm_order)
-            else:
-                beams = [b[:-1] for b in trimmed_beams]
+            if len(scored_beams) > 0:
+                # remove beam outliers
+                max_score = max([b[-1] for b in scored_beams])
+                scored_beams = [b for b in scored_beams if b[-1] >= max_score + beam_prune_logp]
+                # beam pruning by taking highest N prefixes and then filtering down
+                trimmed_beams = _sort_and_trim_beams(scored_beams, beam_width)
+                # prune history and remove lm score from beams
+                if prune_history:
+                    lm_order = 1 if language_model is None else language_model.order
+                    beams = _prune_history(trimmed_beams, lm_order=lm_order)
+                else:
+                    beams = [b[:-1] for b in trimmed_beams]
 
         # final lm scoring and sorting
         new_beams = []
         for text, _, word_part, _, frame_list, frames, logit_score in beams:
-            new_token_times = frame_list if word_part == "" else frame_list + [frames]
-            new_beams.append((text, word_part, "", None, new_token_times, (-1, -1), logit_score))
+            if text.lower() not in beams_to_filter:
+                new_token_times = frame_list if word_part == "" else frame_list + [frames]
+                new_beams.append((text, word_part, "", None, new_token_times, (-1, -1), logit_score))
         new_beams = _merge_beams(new_beams)
         scored_beams = self._get_lm_beams(
             new_beams,
@@ -503,21 +510,23 @@ class BeamSearchDecoderCTC:
             cached_p_lm_scores,
             is_eos=True,
         )
-        # remove beam outliers
-        max_score = max([b[-1] for b in scored_beams])
-        scored_beams = [b for b in scored_beams if b[-1] >= max_score + beam_prune_logp]
-        trimmed_beams = _sort_and_trim_beams(scored_beams, beam_width)
-        # remove unnecessary information from beams
-        output_beams = [
-            (
-                _normalize_whitespace(text),
-                cached_lm_scores[text][-1] if text in cached_lm_scores else None,
-                list(zip(text.split(), text_frames)),
-                logit_score,
-                combined_score,  # same as logit_score if lm is missing
-            )
-            for text, _, _, _, text_frames, _, logit_score, combined_score in trimmed_beams
-        ]
+        output_beams = []
+        if len(scored_beams) > 0:
+            # remove beam outliers
+            max_score = max([b[-1] for b in scored_beams])
+            scored_beams = [b for b in scored_beams if b[-1] >= max_score + beam_prune_logp]
+            trimmed_beams = _sort_and_trim_beams(scored_beams, beam_width)
+            # remove unnecessary information from beams
+            output_beams = [
+                (
+                    _normalize_whitespace(text),
+                    cached_lm_scores[text][-1] if text in cached_lm_scores else None,
+                    list(zip(text.split(), text_frames)),
+                    logit_score,
+                    combined_score,  # same as logit_score if lm is missing
+                )
+                for text, _, _, _, text_frames, _, logit_score, combined_score in trimmed_beams
+            ]
         return output_beams
 
     def decode_beams(
@@ -530,6 +539,7 @@ class BeamSearchDecoderCTC:
         hotwords: Optional[Iterable[str]] = None,
         hotword_weight: float = DEFAULT_HOTWORD_WEIGHT,
         lm_start_state: LMState = None,
+        beams_to_filter: List[str] = list(),
     ) -> List[OutputBeam]:
         """Convert input token logit matrix to decoded beams including meta information.
 
@@ -564,6 +574,7 @@ class BeamSearchDecoderCTC:
             prune_history=prune_history,
             hotword_scorer=hotword_scorer,
             lm_start_state=lm_start_state,
+            beams_to_filter=beams_to_filter
         )
         return decoded_beams
 
